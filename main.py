@@ -1,17 +1,15 @@
 
 import os
-import time
 import requests
+from flask import Flask, request
 
-TOKEN = os.environ.get("BOT_TOKEN")
+app = Flask(__name__)
 
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
-
+TOKEN = os.environ.get("BOT_TOKEN", "")
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 def send_message(chat_id, text):
-    requests.post(
+    return requests.post(
         f"{API}/sendMessage",
         json={"chat_id": chat_id, "text": text},
         timeout=20
@@ -21,11 +19,7 @@ def search_music(chat_id, query):
     try:
         response = requests.get(
             "https://itunes.apple.com/search",
-            params={
-                "term": query,
-                "entity": "song",
-                "limit": 5
-            },
+            params={"term": query, "entity": "song", "limit": 3},
             timeout=20
         )
         response.raise_for_status()
@@ -41,8 +35,9 @@ def search_music(chat_id, query):
             link = song.get("trackViewUrl", "")
             preview = song.get("previewUrl")
 
-            caption = f"{name} - {artist}\nသီချင်းစာမျက်နှာ: {link}"
+            caption = f"{name} - {artist}\n{link}"
 
+            sent = False
             if preview:
                 result = requests.post(
                     f"{API}/sendAudio",
@@ -51,55 +46,62 @@ def search_music(chat_id, query):
                         "audio": preview,
                         "caption": caption
                     },
-                    timeout=40
+                    timeout=30
                 )
-                if result.ok:
-                    continue
+                sent = result.ok
 
-            send_message(chat_id, caption)
+            if not sent:
+                send_message(chat_id, caption)
 
     except Exception:
+        send_message(chat_id, "ရှာမရသေးပါ။ ခဏနားပြီး ပြန်စမ်းပါ။")
+
+def handle_update(update):
+    message = update.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "").strip()
+
+    if not chat_id or not text:
+        return
+
+    if text.startswith("/start"):
         send_message(
             chat_id,
-            "ရှာဖွေရာမှာ အမှားဖြစ်နေပါတယ်။ နောက်မှပြန်စမ်းပါ။"
+            "မင်္ဂလာပါ! သီချင်းနာမည် သို့မဟုတ် အဆိုတော်နာမည် ရိုက်ရှာပါ။"
         )
+    elif text.startswith("/"):
+        send_message(chat_id, "သီချင်းနာမည်ကို ရိုက်ပို့ပါ။")
+    else:
+        search_music(chat_id, text)
 
-def main():
-    offset = None
-    send_message_id = None
+@app.route("/", methods=["GET"])
+def home():
+    return "Music Bot service is running."
 
-    while True:
+@app.route("/telegram-webhook", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json(silent=True) or {}
+    try:
+        handle_update(update)
+    except Exception:
+        app.logger.exception("Update processing failed")
+    return "OK", 200
+
+def setup_webhook():
+    if not TOKEN:
+        app.logger.error("BOT_TOKEN environment variable is missing")
+        return
+
+    base_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if base_url:
         try:
-            response = requests.get(
-                f"{API}/getUpdates",
-                params={"offset": offset, "timeout": 25},
-                timeout=35
+            response = requests.post(
+                f"{API}/setWebhook",
+                json={"url": base_url + "/telegram-webhook"},
+                timeout=20
             )
-            response.raise_for_status()
-
-            for update in response.json().get("result", []):
-                offset = update["update_id"] + 1
-                message = update.get("message", {})
-                chat = message.get("chat", {})
-                chat_id = chat.get("id")
-                text = message.get("text", "").strip()
-
-                if not chat_id or not text:
-                    continue
-
-                if text.startswith("/start"):
-                    send_message(
-                        chat_id,
-                        "မင်္ဂလာပါ။ သီချင်းနာမည် သို့မဟုတ် "
-                        "အဆိုတော်နာမည်ကို ရိုက်ရှာနိုင်ပါတယ်။"
-                    )
-                elif text.startswith("/"):
-                    send_message(chat_id, "သီချင်းနာမည်ကို ရိုက်ပို့ပါ။")
-                else:
-                    search_music(chat_id, text)
-
+            app.logger.info("Webhook setup: %s", response.text)
         except Exception:
-            time.sleep(5)
+            app.logger.exception("Webhook setup failed")
 
-if __name__ == "__main__":
-    main()
+setup_webhook()
